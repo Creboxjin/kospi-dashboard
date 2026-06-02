@@ -1,5 +1,6 @@
 import streamlit as st
 import yfinance as yf
+import FinanceDataReader as fdr  # 플랜 B 우회 라이브러리 추가
 import pandas as pd
 import plotly.express as px
 
@@ -8,19 +9,30 @@ st.set_page_config(page_title="KOSPI 과열 분석 대시보드", layout="wide")
 st.title("📈 KOSPI 이격도 단기 조정(폭락) 리스크 대시보드")
 st.markdown("이격도 과열 시그널 발생 후, **10영업일 이내에 발생하는 단기 최대 낙폭(MAE)**을 추적하여 하락장 진입 확률을 계산합니다.")
 
-# 2. 데이터 수집 및 연산
-@st.cache_data
+# 2. 데이터 수집 및 연산 (클라우드 IP 차단 우회 로직 적용)
+@st.cache_data(ttl=3600) # 한 번 가져온 데이터는 1시간 동안 보관 (서버 차단 방지용)
 def load_data():
-    df_raw = yf.download('^KS11', start="1996-12-11")
-    
-    if isinstance(df_raw.columns, pd.MultiIndex):
-        df = pd.DataFrame({
-            'Close': df_raw['Close'].squeeze(),
-            'Low': df_raw['Low'].squeeze()
-        })
-    else:
-        df = df_raw[['Close', 'Low']].copy()
+    try:
+        # [플랜 A] yfinance로 먼저 시도
+        df_raw = yf.download('^KS11', start="1996-12-11", progress=False)
         
+        # 클라우드 IP가 차단당해서 데이터가 비어있다면 에러 발생시킴
+        if df_raw.empty:
+            raise ValueError("yfinance empty data")
+            
+        if isinstance(df_raw.columns, pd.MultiIndex):
+            df = pd.DataFrame({
+                'Close': df_raw['Close'].squeeze(),
+                'Low': df_raw['Low'].squeeze()
+            })
+        else:
+            df = df_raw[['Close', 'Low']].copy()
+            
+    except Exception:
+        # [플랜 B] 에러 발생 시 FinanceDataReader로 데이터 우회 수집
+        df_raw = fdr.DataReader('KS11', '1996-12-11')
+        df = df_raw[['Close', 'Low']].copy()
+
     df['MA50'] = df['Close'].rolling(window=50).mean()
     df['Disparity'] = (df['Close'] / df['MA50']) * 100
     
@@ -42,7 +54,7 @@ threshold = st.sidebar.slider("과열 이격도 기준 (%)", min_value=100, max_
 
 st.sidebar.markdown("---")
 mae_target = st.sidebar.slider("단기 하락(조정) 판단 기준 (%)", min_value=-15, max_value=-1, value=-5, step=1)
-st.sidebar.caption("시그널 이후 10일 내에 해당 수치 이상 주가가 하락하면 '적중'으로 간주합니다.")
+st.sidebar.caption("시그널 이후 10일 내에 해당 수치 이상 주가가 하락하면 '적중'으로 간주함.")
 
 st.sidebar.markdown("---")
 chart_period = st.sidebar.radio("상단 차트 기간", ["최근 2년 (500일)", "최근 5년 (1250일)", "전체 기간 (1996년~)"])
@@ -86,14 +98,9 @@ st.markdown("---")
 st.subheader("📋 시그널 발생 후 10일 내 단기 낙폭 상세 내역")
 
 if len(valid_signals) > 0:
-    # 텍스트 가시성을 높이기 위해 표시할 컬럼만 추출하고 소수점 2자리 반올림
     display_df = valid_signals[['Close', 'Disparity', 'Min_Low_10d', 'MAE_10d(%)']].copy()
     display_df = display_df.round(2)
-    
-    # 컬럼명을 한글로 직관적으로 변경
     display_df.columns = ['당일 종가', '이격도(%)', '10일 내 최저가', '최대 낙폭(%)']
-    
-    # 최신 날짜가 맨 위로 오도록 역순 정렬하여 전체 가로 폭에 맞춰 출력
     st.dataframe(display_df.sort_index(ascending=False), use_container_width=True)
 else:
     st.info("조건에 부합하는 시그널이 없습니다.")
